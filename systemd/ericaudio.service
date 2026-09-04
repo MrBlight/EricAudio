@@ -1,0 +1,13 @@
+[Unit]
+Description=EricAudio virtual microphone mixer
+After=pipewire.service pipewire-pulse.service pulseaudio.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ericaudio daemon
+ExecStop=/usr/bin/ericaudio cleanup
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
