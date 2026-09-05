@@ -5,79 +5,134 @@
 
 set -u
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 VIRTUAL_SINK="virtual_audio"
 VIRTUAL_SOURCE="ericaudio_microphone"
+
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ericaudio"
 STATE_FILE="$STATE_DIR/state"
+
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ericaudio"
 CONFIG_FILE="$CONFIG_DIR/config"
 
 MIC_SOURCE=""
 PHYSICAL_SINK=""
+DEFAULT_SOURCE_BEFORE_ERICAUDIO=""
+
 ROUTE_APPLICATION_IDS="org.vinegarhq.Sober"
 
-log() { printf '%s\n' "$*"; }
-die() { printf 'EricAudio: %s\n' "$*" >&2; exit 1; }
+
+log() {
+    printf '%s\n' "$*"
+}
+
+
+die() {
+    printf 'EricAudio: %s\n' "$*" >&2
+    exit 1
+}
+
 
 require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "'$1' was not found. Install the package that provides it and try again."
+    command -v "$1" >/dev/null 2>&1 ||
+        die "'$1' was not found. Install the package that provides it and try again."
 }
+
 
 require_audio_server() {
     require_command pactl
+
     if ! pactl info >/dev/null 2>&1; then
         die "could not connect to the PulseAudio-compatible audio server. Make sure PipeWire's pipewire-pulse or PulseAudio is running."
     fi
 }
 
+
 load_config() {
     ROUTE_APPLICATION_IDS="org.vinegarhq.Sober"
+
     [[ -r "$CONFIG_FILE" ]] || return 0
 
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
 }
 
+
 save_state() {
-    mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
+    mkdir -p "$STATE_DIR" ||
+        die "cannot create $STATE_DIR"
+
     {
         printf 'MIC_SOURCE=%q\n' "$MIC_SOURCE"
         printf 'PHYSICAL_SINK=%q\n' "$PHYSICAL_SINK"
-    } > "$STATE_FILE" || die "cannot write $STATE_FILE"
+        printf 'DEFAULT_SOURCE_BEFORE_ERICAUDIO=%q\n' "$DEFAULT_SOURCE_BEFORE_ERICAUDIO"
+    } > "$STATE_FILE" ||
+        die "cannot write $STATE_FILE"
 }
+
 
 load_state() {
     MIC_SOURCE=""
     PHYSICAL_SINK=""
+    DEFAULT_SOURCE_BEFORE_ERICAUDIO=""
+
     [[ -r "$STATE_FILE" ]] || return 0
+
     # shellcheck disable=SC1090
     . "$STATE_FILE"
 }
 
+
 source_exists() {
-    pactl list short sources | awk -v n="$1" '$2 == n {found=1} END {exit !found}'
+    pactl list short sources |
+        awk -v n="$1" '$2 == n {found=1} END {exit !found}'
 }
+
 
 sink_exists() {
-    pactl list short sinks | awk -v n="$1" '$2 == n {found=1} END {exit !found}'
+    pactl list short sinks |
+        awk -v n="$1" '$2 == n {found=1} END {exit !found}'
 }
+
 
 list_physical_sources() {
-    pactl list short sources | awk '$2 !~ /\.monitor$/ && $2 !~ /^ericaudio_microphone$/ {print $1 "\t" $2}'
+    pactl list short sources |
+        awk '$2 !~ /\.monitor$/ && $2 !~ /^ericaudio_microphone$/ {
+            print $1 "\t" $2
+        }'
 }
 
+
 list_physical_sinks() {
-    pactl list short sinks | awk '$2 != "virtual_audio" {print $1 "\t" $2}'
+    pactl list short sinks |
+        awk '$2 != "virtual_audio" {
+            print $1 "\t" $2
+        }'
 }
+
 
 choose_physical_devices() {
     load_state
     load_config
 
+    if [[ -z "$DEFAULT_SOURCE_BEFORE_ERICAUDIO" ]]; then
+        local current_default_source
+
+        current_default_source="$(
+            pactl get-default-source 2>/dev/null || true
+        )"
+
+        if [[ -n "$current_default_source" &&
+              "$current_default_source" != "$VIRTUAL_SOURCE" &&
+              "$current_default_source" != *.monitor ]]; then
+            DEFAULT_SOURCE_BEFORE_ERICAUDIO="$current_default_source"
+        fi
+    fi
+
     if [[ -n "$MIC_SOURCE" ]] && ! source_exists "$MIC_SOURCE"; then
         MIC_SOURCE=""
     fi
+
     if [[ -n "$PHYSICAL_SINK" ]] && ! sink_exists "$PHYSICAL_SINK"; then
         PHYSICAL_SINK=""
     fi
@@ -85,7 +140,10 @@ choose_physical_devices() {
     if [[ -z "$MIC_SOURCE" ]]; then
         local default_source
         default_source="$(pactl get-default-source 2>/dev/null || true)"
-        if [[ -n "$default_source" && "$default_source" != "$VIRTUAL_SOURCE" && "$default_source" != *.monitor ]]; then
+
+        if [[ -n "$default_source" &&
+              "$default_source" != "$VIRTUAL_SOURCE" &&
+              "$default_source" != *.monitor ]]; then
             MIC_SOURCE="$default_source"
         fi
     fi
@@ -93,97 +151,178 @@ choose_physical_devices() {
     if [[ -z "$PHYSICAL_SINK" ]]; then
         local default_sink
         default_sink="$(pactl get-default-sink 2>/dev/null || true)"
-        if [[ -n "$default_sink" && "$default_sink" != "$VIRTUAL_SINK" ]]; then
+
+        if [[ -n "$default_sink" &&
+              "$default_sink" != "$VIRTUAL_SINK" ]]; then
             PHYSICAL_SINK="$default_sink"
         fi
     fi
 
-    # Conservative fallback: choose the first non-monitor input and first non-EricAudio sink.
+    # Conservative fallback:
+    # choose the first non-monitor input and first non-EricAudio sink.
     if [[ -z "$MIC_SOURCE" ]]; then
-        MIC_SOURCE="$(list_physical_sources | awk 'NR==1 {print $2}')"
-    fi
-    if [[ -z "$PHYSICAL_SINK" ]]; then
-        PHYSICAL_SINK="$(list_physical_sinks | awk 'NR==1 {print $2}')"
+        MIC_SOURCE="$(
+            list_physical_sources |
+                awk 'NR == 1 {print $2}'
+        )"
     fi
 
-    [[ -n "$MIC_SOURCE" ]] || die "could not find a microphone/input source. Run 'pactl list short sources' and set MIC_SOURCE in $CONFIG_FILE."
-    [[ -n "$PHYSICAL_SINK" ]] || die "could not find an output sink. Run 'pactl list short sinks' and set PHYSICAL_SINK in $CONFIG_FILE."
-    [[ "$MIC_SOURCE" != "$VIRTUAL_SOURCE" ]] || die "the selected microphone is EricAudio's own virtual microphone"
-    [[ "$PHYSICAL_SINK" != "$VIRTUAL_SINK" ]] || die "the selected output is EricAudio's own virtual sink"
+    if [[ -z "$PHYSICAL_SINK" ]]; then
+        PHYSICAL_SINK="$(
+            list_physical_sinks |
+                awk 'NR == 1 {print $2}'
+        )"
+    fi
+
+    [[ -n "$MIC_SOURCE" ]] ||
+        die "could not find a microphone/input source. Run 'pactl list short sources' and set MIC_SOURCE in $CONFIG_FILE."
+
+    [[ -n "$PHYSICAL_SINK" ]] ||
+        die "could not find an output sink. Run 'pactl list short sinks' and set PHYSICAL_SINK in $CONFIG_FILE."
+
+    [[ "$MIC_SOURCE" != "$VIRTUAL_SOURCE" ]] ||
+        die "the selected microphone is EricAudio's own virtual microphone"
+
+    [[ "$PHYSICAL_SINK" != "$VIRTUAL_SINK" ]] ||
+        die "the selected output is EricAudio's own virtual sink"
 
     save_state
 }
+
 
 ensure_virtual_sink() {
     if ! sink_exists "$VIRTUAL_SINK"; then
         pactl load-module module-null-sink \
             sink_name="$VIRTUAL_SINK" \
-            sink_properties='device.description="EricAudio Virtual Audio" ericaudio.role=sink' >/dev/null \
-            || die "could not create the EricAudio virtual sink"
+            sink_properties='device.description="EricAudio Virtual Audio" ericaudio.role=sink' >/dev/null ||
+            die "could not create the EricAudio virtual sink"
     fi
 }
+
+
+find_loopback_modules_for_source() {
+    local wanted="$1"
+
+    pactl list short modules |
+        awk -v wanted="$wanted" '
+            $2 == "module-loopback" && $0 ~ /sink=virtual_audio/ {
+                source_found=0
+
+                for (i = 3; i <= NF; i++) {
+                    if ($i == "source=" wanted) {
+                        source_found=1
+                        break
+                    }
+                }
+
+                if (source_found)
+                    print $1
+            }
+        '
+}
+
 
 find_role_source_output() {
     local wanted="$1"
-    pactl list source-outputs | awk -v wanted="$wanted" '
-        /Source Output #[0-9]+/ {
-            if (id != "" && role == wanted && target == "virtual_audio") print id
-            id=$3; sub(/^#/, "", id)
-            role=""
-            target=""
-        }
-        /ericaudio.role = / {
-            role=$0
-            sub(/^.*ericaudio.role = "/, "", role)
-            sub(/".*$/, "", role)
-        }
-        /target.object = / {
-            target=$0
-            sub(/^.*target.object = "/, "", target)
-            sub(/".*$/, "", target)
-        }
-        END {
-            if (id != "" && role == wanted && target == "virtual_audio") print id
-        }
-    ' | tail -n1
+    local source=""
+    local module_id=""
+
+    case "$wanted" in
+        mic)
+            source="$MIC_SOURCE"
+            ;;
+        music)
+            source="${PHYSICAL_SINK}.monitor"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    module_id="$(
+        find_loopback_modules_for_source "$source" |
+            head -n1
+    )"
+
+    [[ -n "$module_id" ]] || return 0
+
+    pactl list source-outputs |
+        awk -v wanted="$module_id" '
+            /Source Output #[0-9]+/ {
+                id=$3
+                sub(/^#/, "", id)
+                owner=""
+            }
+
+            /Owner Module:/ {
+                owner=$3
+            }
+
+            owner == wanted {
+                print id
+                exit
+            }
+        '
 }
+
+
+ensure_loopback() {
+    local source="$1"
+    local error_message="$2"
+    local properties="$3"
+    local module_id=""
+    local keep_id=""
+
+    while read -r module_id; do
+        [[ -n "$module_id" ]] || continue
+
+        if [[ -z "$keep_id" ]]; then
+            keep_id="$module_id"
+        else
+            log "Removing duplicate EricAudio loopback module $module_id"
+            pactl unload-module "$module_id" 2>/dev/null || true
+        fi
+    done < <(
+        find_loopback_modules_for_source "$source"
+    )
+
+    if [[ -z "$keep_id" ]]; then
+        pactl load-module module-loopback \
+            source="$source" \
+            sink="$VIRTUAL_SINK" \
+            latency_msec=10 \
+            source_output_properties="$properties" >/dev/null ||
+            die "$error_message"
+    fi
+}
+
 
 ensure_loopbacks() {
-    local mic_stream music_stream
-    mic_stream="$(find_role_source_output mic)"
-    music_stream="$(find_role_source_output music)"
+    ensure_loopback \
+        "$MIC_SOURCE" \
+        "could not create the microphone loopback from '$MIC_SOURCE'" \
+        'ericaudio.role=mic'
 
-    if [[ -z "$mic_stream" ]]; then
-        pactl load-module module-loopback \
-            source="$MIC_SOURCE" \
-            sink="$VIRTUAL_SINK" \
-            latency_msec=10 \
-            source_output_properties='ericaudio.role=mic' >/dev/null \
-            || die "could not create the microphone loopback from '$MIC_SOURCE'"
-    fi
-
-    if [[ -z "$music_stream" ]]; then
-        pactl load-module module-loopback \
-            source="${PHYSICAL_SINK}.monitor" \
-            sink="$VIRTUAL_SINK" \
-            latency_msec=10 \
-            source_output_properties='ericaudio.role=music' >/dev/null \
-            || die "could not capture the monitor of '$PHYSICAL_SINK'. This output device may not expose a monitor source."
-    fi
+    ensure_loopback \
+        "${PHYSICAL_SINK}.monitor" \
+        "could not capture the monitor of '$PHYSICAL_SINK'. This output device may not expose a monitor source." \
+        'ericaudio.role=music'
 }
+
 
 ensure_virtual_source() {
     if ! source_exists "$VIRTUAL_SOURCE"; then
         pactl load-module module-remap-source \
             master="${VIRTUAL_SINK}.monitor" \
             source_name="$VIRTUAL_SOURCE" \
-            source_properties='device.description="EricAudio Microphone" ericaudio.role=source' >/dev/null \
-            || die "could not create the EricAudio virtual microphone"
+            source_properties='device.description="EricAudio Microphone" ericaudio.role=source' >/dev/null ||
+            die "could not create the EricAudio virtual microphone"
     fi
 
-    pactl set-default-source "$VIRTUAL_SOURCE" >/dev/null 2>&1 \
-        || die "could not make EricAudio the default microphone"
+    pactl set-default-source "$VIRTUAL_SOURCE" >/dev/null 2>&1 ||
+        die "could not make EricAudio the default microphone"
 }
+
 
 ensure_all() {
     require_audio_server
@@ -193,131 +332,329 @@ ensure_all() {
     ensure_virtual_source
 }
 
+
 find_capture_by_app_id() {
     local app_id="$1"
-    pactl list source-outputs | awk -v app="$app_id" '
-        /Source Output #[0-9]+/ {
-            id=$3; sub(/^#/, "", id)
-            found=0
-        }
-        /application.id = / {
-            value=$0
-            sub(/^.*application.id = "/, "", value)
-            sub(/".*$/, "", value)
-            if (value == app) found=1
-        }
-        /media.class = "Stream\/Input\/Audio"/ {
-            capture=1
-        }
-        found && capture {print id; found=0; capture=0}
-    ' | tail -n1
+
+    pactl list source-outputs |
+        awk -v app="$app_id" '
+            /Source Output #[0-9]+/ {
+                id=$3
+                sub(/^#/, "", id)
+                found=0
+                capture=0
+            }
+
+            /application.id = / {
+                value=$0
+                sub(/^.*application.id = "/, "", value)
+                sub(/".*$/, "", value)
+
+                if (value == app)
+                    found=1
+            }
+
+            /media.class = "Stream\/Input\/Audio"/ {
+                capture=1
+            }
+
+            found && capture {
+                print id
+                found=0
+                capture=0
+            }
+        ' |
+        tail -n1
 }
+
 
 route_application() {
     local app_id capture_id
     local old_ifs="$IFS"
+
     IFS=','
+
     for app_id in $ROUTE_APPLICATION_IDS; do
         app_id="${app_id#${app_id%%[![:space:]]*}}"
         app_id="${app_id%${app_id##*[![:space:]]}}"
+
         [[ -n "$app_id" ]] || continue
+
         capture_id="$(find_capture_by_app_id "$app_id")"
+
         if [[ -n "$capture_id" ]]; then
-            pactl move-source-output "$capture_id" "$VIRTUAL_SOURCE" 2>/dev/null || true
+            pactl move-source-output \
+                "$capture_id" \
+                "$VIRTUAL_SOURCE" \
+                2>/dev/null || true
         fi
     done
+
     IFS="$old_ifs"
 }
+
 
 set_mix() {
     local mode="$1"
     local mic_id music_id
+
     ensure_all
 
     mic_id="$(find_role_source_output mic)"
     music_id="$(find_role_source_output music)"
-    [[ -n "$mic_id" && -n "$music_id" ]] || die "EricAudio's internal loopbacks are missing"
 
-    pactl set-source-output-mute "$mic_id" 0 || die "could not unmute microphone path"
-    pactl set-source-output-mute "$music_id" 0 || die "could not unmute music path"
+    [[ -n "$mic_id" && -n "$music_id" ]] ||
+        die "EricAudio's internal loopbacks are missing"
+
+    pactl set-source-output-mute "$mic_id" 0 ||
+        die "could not unmute microphone path"
+
+    pactl set-source-output-mute "$music_id" 0 ||
+        die "could not unmute music path"
 
     case "$mode" in
-        mic)   pactl set-source-output-volume "$mic_id" 100%; pactl set-source-output-volume "$music_id" 0% ;;
-        music) pactl set-source-output-volume "$mic_id" 0%;   pactl set-source-output-volume "$music_id" 100% ;;
-        50-50) pactl set-source-output-volume "$mic_id" 50%;  pactl set-source-output-volume "$music_id" 50% ;;
-        75-25) pactl set-source-output-volume "$mic_id" 75%;  pactl set-source-output-volume "$music_id" 25% ;;
-        25-75) pactl set-source-output-volume "$mic_id" 25%;  pactl set-source-output-volume "$music_id" 75% ;;
-        *) die "unknown mix mode '$mode'" ;;
+        mic)
+            pactl set-source-output-volume "$mic_id" 100%
+            pactl set-source-output-volume "$music_id" 0%
+            ;;
+
+        music)
+            pactl set-source-output-volume "$mic_id" 0%
+            pactl set-source-output-volume "$music_id" 100%
+            ;;
+
+        50-50)
+            pactl set-source-output-volume "$mic_id" 50%
+            pactl set-source-output-volume "$music_id" 50%
+            ;;
+
+        75-25)
+            pactl set-source-output-volume "$mic_id" 75%
+            pactl set-source-output-volume "$music_id" 25%
+            ;;
+
+        25-75)
+            pactl set-source-output-volume "$mic_id" 25%
+            pactl set-source-output-volume "$music_id" 75%
+            ;;
+
+        *)
+            die "unknown mix mode '$mode'"
+            ;;
     esac
 
     route_application
+
     log "EricAudio → $mode"
 }
 
+
 setup() {
     ensure_all
+
     mkdir -p "$CONFIG_DIR"
+
     if [[ ! -e "$CONFIG_FILE" ]]; then
         cat > "$CONFIG_FILE" <<EOF_CONFIG
 # EricAudio configuration
 # Edit these values if automatic selection picks the wrong devices.
 MIC_SOURCE="$MIC_SOURCE"
 PHYSICAL_SINK="$PHYSICAL_SINK"
-# Comma-separated application IDs whose microphone capture should be routed to EricAudio.
+
+# Comma-separated application IDs whose microphone capture
+# should be routed to EricAudio.
 ROUTE_APPLICATION_IDS="$ROUTE_APPLICATION_IDS"
 EOF_CONFIG
+
         chmod 600 "$CONFIG_FILE"
     fi
+
     log "EricAudio is configured."
-    log "Microphone: $MIC_SOURCE"
-    log "Output:     $PHYSICAL_SINK"
+    log "Microphone:  $MIC_SOURCE"
+    log "Output:      $PHYSICAL_SINK"
     log "Virtual mic: $VIRTUAL_SOURCE"
 }
 
+
 status() {
     require_audio_server
+
     load_config
     load_state
+
     printf '%s\n' 'EricAudio' '──────────────'
-    printf 'Audio server: %s\n' "$(pactl info | sed -n 's/^Server Name: //p' | head -n1)"
-    printf 'MIC SOURCE:   %s\n' "${MIC_SOURCE:-unknown}"
-    printf 'PHYSICAL SINK: %s\n' "${PHYSICAL_SINK:-unknown}"
-    printf 'VIRTUAL SINK: %s\n' "$VIRTUAL_SINK"
-    printf 'VIRTUAL MIC:  %s\n' "$VIRTUAL_SOURCE"
-    printf 'ROUTED APPS:  %s\n' "$ROUTE_APPLICATION_IDS"
-    printf 'MIC LOOPBACK: %s\n' "$(find_role_source_output mic || true)"
-    printf 'MUSIC LOOPBACK: %s\n' "$(find_role_source_output music || true)"
+
+    printf 'Audio server:   %s\n' \
+        "$(pactl info | sed -n 's/^Server Name: //p' | head -n1)"
+
+    printf 'MIC SOURCE:     %s\n' \
+        "${MIC_SOURCE:-unknown}"
+
+    printf 'PHYSICAL SINK:  %s\n' \
+        "${PHYSICAL_SINK:-unknown}"
+
+    printf 'VIRTUAL SINK:   %s\n' \
+        "$VIRTUAL_SINK"
+
+    printf 'VIRTUAL MIC:    %s\n' \
+        "$VIRTUAL_SOURCE"
+
+    printf 'ROUTED APPS:    %s\n' \
+        "$ROUTE_APPLICATION_IDS"
+
+    printf 'MIC LOOPBACK:   %s\n' \
+        "$(find_role_source_output mic || true)"
+
+    printf 'MUSIC LOOPBACK: %s\n' \
+        "$(find_role_source_output music || true)"
+
+    printf 'SERVICE:        %s\n' \
+        "$(systemctl --user is-active ericaudio.service 2>/dev/null || printf 'inactive')"
 }
+
 
 cleanup() {
     require_audio_server
+
+    load_state
+
     local id
+    local restore_default_source=0
+
+    if [[ "$(pactl get-default-source 2>/dev/null || true)" == "$VIRTUAL_SOURCE" ]]; then
+        restore_default_source=1
+    fi
 
     # Remove our virtual source first.
-    pactl list short modules | awk '$2 == "module-remap-source" && $0 ~ /ericaudio_microphone/ {print $1}' | while read -r id; do
-        [[ -n "$id" ]] && pactl unload-module "$id" 2>/dev/null || true
-    done
+    pactl list short modules |
+        awk '$2 == "module-remap-source" &&
+             $0 ~ /source_name=ericaudio_microphone/ {
+                print $1
+             }' |
+        while read -r id; do
+            [[ -n "$id" ]] &&
+                pactl unload-module "$id" 2>/dev/null || true
+        done
 
-    # Find the owner module IDs of our tagged loopbacks.
-    pactl list source-outputs | awk '
-        /Source Output #[0-9]+/ { id=$3; sub(/^#/, "", id); owner=""; role=0 }
-        /Owner Module:/ { owner=$3 }
-        /ericaudio.role = "(mic|music)"/ { role=1 }
-        role && owner != "" { print owner; role=0 }
-    ' | sort -nu | while read -r id; do
-        [[ -n "$id" ]] && pactl unload-module "$id" 2>/dev/null || true
-    done
+    # Remove every EricAudio loopback feeding virtual_audio.
+    pactl list short modules |
+        awk '$2 == "module-loopback" &&
+             $0 ~ /sink=virtual_audio/ {
+                print $1
+             }' |
+        sort -nu |
+        while read -r id; do
+            [[ -n "$id" ]] &&
+                pactl unload-module "$id" 2>/dev/null || true
+        done
 
     # Finally remove our virtual sink.
-    pactl list short modules | awk '$2 == "module-null-sink" && $0 ~ /sink_name=virtual_audio/ {print $1}' | while read -r id; do
-        [[ -n "$id" ]] && pactl unload-module "$id" 2>/dev/null || true
-    done
+    pactl list short modules |
+        awk '$2 == "module-null-sink" &&
+             $0 ~ /sink_name=virtual_audio/ {
+                print $1
+             }' |
+        while read -r id; do
+            [[ -n "$id" ]] &&
+                pactl unload-module "$id" 2>/dev/null || true
+        done
+
+    # Restore the microphone that was the default before EricAudio.
+    if [[ "$restore_default_source" -eq 1 &&
+          -n "$DEFAULT_SOURCE_BEFORE_ERICAUDIO" ]] &&
+       source_exists "$DEFAULT_SOURCE_BEFORE_ERICAUDIO"; then
+
+        pactl set-default-source \
+            "$DEFAULT_SOURCE_BEFORE_ERICAUDIO" \
+            2>/dev/null || true
+    fi
 
     rm -f "$STATE_FILE" 2>/dev/null || true
 }
 
+
+remove_installed_file() {
+    local path="$1"
+
+    [[ -e "$path" || -L "$path" ]] || return 0
+
+    if [[ -w "$path" || -w "$(dirname "$path")" ]]; then
+        rm -f "$path"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo rm -f "$path"
+    else
+        die "cannot remove '$path'; run uninstall with an account that can use sudo"
+    fi
+}
+
+
+uninstall() {
+    log "EricAudio uninstall"
+    log "──────────────────"
+
+    # Stop and disable the user service first.
+    systemctl --user disable --now ericaudio.service 2>/dev/null || true
+
+    # Remove runtime audio objects and restore the previous microphone.
+    if command -v pactl >/dev/null 2>&1 &&
+       pactl info >/dev/null 2>&1; then
+        cleanup || true
+    else
+        log "Audio server is unavailable; skipping runtime audio cleanup."
+    fi
+
+    # Remove user-level service files.
+    rm -f \
+        "$HOME/.config/systemd/user/ericaudio.service" \
+        "$HOME/.local/share/systemd/user/ericaudio.service"
+
+    systemctl --user daemon-reload 2>/dev/null || true
+
+    # Remove EricAudio configuration and state.
+    rm -rf "$CONFIG_DIR" "$STATE_DIR"
+
+    # Remove old manually-installed executable.
+    rm -f "$HOME/.local/bin/EricAudio"
+
+    # If installed as an Arch package, let pacman remove it.
+    if command -v pacman >/dev/null 2>&1 &&
+       pacman -Qq ericaudio >/dev/null 2>&1; then
+
+        if command -v sudo >/dev/null 2>&1; then
+            log "Removing Arch package..."
+
+            sudo pacman -R --noconfirm ericaudio ||
+                die "pacman could not remove the ericaudio package"
+        else
+            die "the ericaudio package is installed; sudo is required to remove it cleanly"
+        fi
+    else
+        # Generic /usr installation.
+        remove_installed_file "/usr/bin/ericaudio"
+        remove_installed_file "/usr/local/bin/ericaudio"
+
+        remove_installed_file \
+            "/usr/lib/systemd/user/ericaudio.service"
+
+        remove_installed_file \
+            "/usr/local/lib/systemd/user/ericaudio.service"
+
+        remove_installed_file \
+            "/usr/share/licenses/ericaudio/LICENSE"
+
+        remove_installed_file \
+            "/usr/local/share/licenses/ericaudio/LICENSE"
+    fi
+
+    systemctl --user daemon-reload 2>/dev/null || true
+
+    log "EricAudio has been completely removed."
+}
+
+
 daemon() {
     log "EricAudio daemon started"
+
     while :; do
         if pactl info >/dev/null 2>&1; then
             load_state
@@ -328,14 +665,20 @@ daemon() {
             fi
 
             if sink_exists "$VIRTUAL_SINK"; then
-                if [[ -z "$MIC_SOURCE" ]] || ! source_exists "$MIC_SOURCE"; then
+
+                if [[ -z "$MIC_SOURCE" ]] ||
+                   ! source_exists "$MIC_SOURCE"; then
                     choose_physical_devices || true
                 fi
 
-                if [[ -n "$MIC_SOURCE" ]] && [[ -n "$PHYSICAL_SINK" ]]; then
-                    if [[ -z "$(find_role_source_output mic)" ]] || [[ -z "$(find_role_source_output music)" ]]; then
+                if [[ -n "$MIC_SOURCE" &&
+                      -n "$PHYSICAL_SINK" ]]; then
+
+                    if [[ -z "$(find_role_source_output mic)" ]] ||
+                       [[ -z "$(find_role_source_output music)" ]]; then
                         ensure_loopbacks || true
                     fi
+
                     if ! source_exists "$VIRTUAL_SOURCE"; then
                         ensure_virtual_source || true
                     fi
@@ -346,9 +689,11 @@ daemon() {
                 fi
             fi
         fi
+
         sleep 1
     done
 }
+
 
 usage() {
     cat <<'EOF_USAGE'
@@ -362,6 +707,7 @@ Usage:
   ericaudio 25-75          25% microphone / 75% music
   ericaudio status         Show detected devices and EricAudio state
   ericaudio cleanup        Remove EricAudio's PipeWire/PulseAudio objects
+  ericaudio uninstall      Stop EricAudio and remove it completely
   ericaudio --help         Show this help
   ericaudio --version      Show the version
 
@@ -371,17 +717,47 @@ Configuration:
 EOF_USAGE
 }
 
+
 main() {
     case "${1:-}" in
-        setup) setup ;;
-        daemon) daemon ;;
-        mic|music|50-50|75-25|25-75) set_mix "$1" ;;
-        status) status ;;
-        cleanup) cleanup ;;
-        --help|-h|help) usage ;;
-        --version|-V|version) printf 'EricAudio %s\n' "$VERSION" ;;
-        *) usage >&2; exit 2 ;;
+        setup)
+            setup
+            ;;
+
+        daemon)
+            daemon
+            ;;
+
+        mic|music|50-50|75-25|25-75)
+            set_mix "$1"
+            ;;
+
+        status)
+            status
+            ;;
+
+        cleanup)
+            cleanup
+            ;;
+
+        uninstall)
+            uninstall
+            ;;
+
+        --help|-h|help)
+            usage
+            ;;
+
+        --version|-V|version)
+            printf 'EricAudio %s\n' "$VERSION"
+            ;;
+
+        *)
+            usage >&2
+            exit 2
+            ;;
     esac
 }
+
 
 main "$@"
